@@ -21,12 +21,13 @@ enum Bytecode {
     DEC_PTR,
     INC_VAL,
     DEC_VAL,
-    OUTPUT,         // Optimized multiple output instructions
-    INPUT,          // Optimized multiple input instructions
+    OUTPUT,
+    INPUT,
     LOOP_START,
     LOOP_END,
-    SET_ZERO,      // Optimization for `[-]` pattern
-    ADD_TO_NEXT    // Optimization for `[->+<]` and similar patterns
+    SET_ZERO,           // Optimization for `[-]` pattern
+    ZERO_RANGE,         // Optimization for a range being zeroed
+    ADD_SUBTRACT_LOOP   // Optimization for loops following the `[->+<]` pattern
 };
 
 struct Instruction {
@@ -80,9 +81,6 @@ std::vector<Instruction> compile_to_bytecode(const std::string& program) {
                 if (i + 2 < program_size && program[i + 1] == '-' && program[i + 2] == ']') {
                     bytecode.push_back({SET_ZERO, 1});
                     i += 2;
-                } else if (i + 5 < program_size && program.substr(i, 6) == "[->+<]") {
-                    bytecode.push_back({ADD_TO_NEXT, 1});
-                    i += 5;
                 } else {
                     bytecode.push_back({LOOP_START, 0});
                     loop_stack.push(bytecode.size() - 1);
@@ -104,14 +102,88 @@ std::vector<Instruction> compile_to_bytecode(const std::string& program) {
     return bytecode;
 }
 
-// Interprets the compiled bytecode
+std::vector<Instruction> optimize_bytecode(const std::vector<Instruction>& bytecode) {
+    std::vector<Instruction> optimized;
+    for (size_t i = 0; i < bytecode.size(); ++i) {
+        Instruction current = bytecode[i];
+
+        // Merge repeated instructions
+        if (i + 1 < bytecode.size() && bytecode[i].op == bytecode[i + 1].op) {
+            Instruction merged = current;
+            while (i + 1 < bytecode.size() && bytecode[i].op == bytecode[i + 1].op) {
+                merged.value += bytecode[i + 1].value;
+                ++i;
+            }
+            optimized.push_back(merged);
+        }
+
+        // Combine consecutive pointer movements
+        if (current.op == INC_PTR || current.op == DEC_PTR) {
+            int movement = current.value;
+            while (i + 1 < bytecode.size() && (bytecode[i + 1].op == INC_PTR || bytecode[i + 1].op == DEC_PTR)) {
+                movement += (bytecode[i + 1].op == INC_PTR ? bytecode[i + 1].value : -bytecode[i + 1].value);
+                ++i;
+            }
+            optimized.push_back({(movement > 0 ? INC_PTR : DEC_PTR), abs(movement)});
+        }
+
+        // Combine consecutive value modifications
+        else if (current.op == INC_VAL || current.op == DEC_VAL) {
+            int modification = current.value;
+            while (i + 1 < bytecode.size() && (bytecode[i + 1].op == INC_VAL || bytecode[i + 1].op == DEC_VAL)) {
+                modification += (bytecode[i + 1].op == INC_VAL ? bytecode[i + 1].value : -bytecode[i + 1].value);
+                ++i;
+            }
+            optimized.push_back({(modification > 0 ? INC_VAL : DEC_VAL), abs(modification)});
+        }
+
+        // Optimize SET_ZERO patterns that went undetected due to comments
+        if (current.op == LOOP_START && i + 2 < bytecode.size() &&
+                 bytecode[i + 1].op == DEC_VAL && bytecode[i + 1].value == 1 &&
+                 bytecode[i + 2].op == LOOP_END) {
+            optimized.push_back({SET_ZERO, 0});
+            i += 2;
+        }
+        
+        if (current.op == LOOP_START) {
+            // `[->+<]` pattern -> ADD_SUBTRACT_LOOP
+            if (i + 6 < bytecode.size() &&
+                bytecode[i + 1].op == DEC_VAL && bytecode[i + 2].op == INC_PTR &&
+                bytecode[i + 3].op == INC_VAL && bytecode[i + 4].op == DEC_PTR &&
+                bytecode[i + 5].op == LOOP_END) {
+
+                optimized.push_back({ADD_SUBTRACT_LOOP, bytecode[i + 3].value});
+                i += 5;
+            }
+
+            // Optimize ZERO_RANGE pattern
+            if (i + 5 < bytecode.size() &&
+                bytecode[i + 1].op == DEC_VAL && bytecode[i + 1].value == 1 &&
+                bytecode[i + 2].op == INC_PTR && bytecode[i + 3].op == SET_ZERO &&
+                bytecode[i + 4].op == DEC_PTR && bytecode[i + 5].op == LOOP_END) {
+
+                optimized.push_back({ZERO_RANGE, 0});
+                i += 5;
+            }
+        }
+
+        // Default case: push the current instruction
+        else {
+            optimized.push_back(current);
+        }
+    }
+
+    return optimized;
+}
+
+
 void interpret_bytecode(const std::vector<Instruction>& bytecode) {
     std::vector<unsigned char> memory(30000, 0); // "Brainfuck uses 30,000 cells"
     size_t ptr = 0;
     std::stack<size_t> loop_stack;
 
     for (size_t pc = 0; pc < bytecode.size(); ++pc) {
-        const auto& instr = bytecode[pc]; // TODO fix
+        const auto& instr = bytecode[pc];
         switch (instr.op) {
             case INC_PTR: ptr += instr.value; break;
             case DEC_PTR: ptr -= instr.value; break;
@@ -126,10 +198,17 @@ void interpret_bytecode(const std::vector<Instruction>& bytecode) {
                     memory[ptr] = std::cin.get();
                 break;
             case SET_ZERO: memory[ptr] = 0; break;
-            case ADD_TO_NEXT:
-                memory[ptr + 1] += memory[ptr];
+            case ADD_SUBTRACT_LOOP: {
+                for (int i = 0; i < instr.value; ++i)
+                    memory[ptr + i + 1] += memory[ptr];
                 memory[ptr] = 0;
                 break;
+            }
+            case ZERO_RANGE: {
+                for (int i = 0; i < instr.value; ++i)
+                    memory[ptr + i] = 0;
+                break;
+            }
             case LOOP_START:
                 if (memory[ptr] == 0) { // Jump to matching LOOP_END
                     int depth = 1;
@@ -196,7 +275,6 @@ int main(int argc, char* argv[]) {
                 case OUTPUT: std::cout << "OUTPUT " << instr.value << " "; break;
                 case INPUT: std::cout << "INPUT " << instr.value << " "; break;
                 case SET_ZERO: std::cout << "SET_ZERO "; break;
-                case ADD_TO_NEXT: std::cout << "ADD_TO_NEXT "; break;
                 case LOOP_START: std::cout << "LOOP_START "; break;
                 case LOOP_END: std::cout << "LOOP_END "; break;
                 default: std::cout << "UNKNOWN "; break;
