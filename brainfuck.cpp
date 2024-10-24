@@ -259,6 +259,7 @@ int main(int argc, char* argv[]) {
                 case OUTPUT: std::cout << "OUTPUT " << instr.value << " "; break;
                 case INPUT: std::cout << "INPUT " << instr.value << " "; break;
                 case SET_ZERO: std::cout << "SET_ZERO "; break;
+                case CLEAR_RANGE: std::cout << "CLEAR_RANGE "; break;
                 case LOOP_START: std::cout << "LOOP_START "; break;
                 case LOOP_END: std::cout << "LOOP_END "; break;
                 default: std::cout << "UNKNOWN "; break;
